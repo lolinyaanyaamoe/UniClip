@@ -1,0 +1,162 @@
+name: Build mobile release with multi-interface fix
+
+on:
+  push:
+    branches: [build/v2.0.0-multinic-fix]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-multinic-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  APP_VARIANT: production
+  UC_ENGINE_UNIFFI_SLICE: device
+  UC_ENGINE_UNIFFI_BUILD_LOCKED: '1'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_RELEASE_DEBUG: '0'
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  engine:
+    name: Engine (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [ios, android]
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: lolinyaanyaamoe/Engine
+          ref: 5b7d59c0073f45413bd608f1c08f71a72c4968da
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: mobile-multinic-${{ matrix.platform }}
+      - name: Install iOS target
+        if: matrix.platform == 'ios'
+        run: rustup target add aarch64-apple-ios
+      - uses: actions/setup-java@v5
+        if: matrix.platform == 'android'
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        if: matrix.platform == 'android'
+      - name: Install Android toolchain
+        if: matrix.platform == 'android'
+        run: |
+          rustup target add aarch64-linux-android x86_64-linux-android
+          cargo install cargo-ndk --version 4.1.2 --locked
+          sdkmanager 'ndk;27.1.12297006' 'platforms;android-36'
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.1.12297006" >> "$GITHUB_ENV"
+      - name: Build release Engine
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          UC_ENGINE_UNIFFI_DIST_DIR: ${{ runner.temp }}/engine-dist
+        run: |
+          test "$(git rev-parse HEAD)" = 5b7d59c0073f45413bd608f1c08f71a72c4968da
+          test -z "$(git status --porcelain)"
+          if [ "$PLATFORM" = ios ]; then
+            bash bindings/uc-engine-uniffi/scripts/build-ios-xcframework.sh
+          else
+            bash bindings/uc-engine-uniffi/scripts/build-android-aar.sh
+          fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: engine-${{ matrix.platform }}
+          path: ${{ runner.temp }}/engine-dist/${{ matrix.platform }}/
+          retention-days: 14
+          if-no-files-found: error
+
+  app:
+    name: App (${{ matrix.platform }})
+    needs: engine
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ios
+            runner: macos-26
+          - platform: android
+            runner: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - uses: actions/setup-java@v5
+        if: matrix.platform == 'android'
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v6
+        if: matrix.platform == 'android'
+      - run: npm ci --ignore-scripts
+      - run: npm run postinstall
+      - run: npm run prepare --workspaces --if-present
+      - uses: actions/download-artifact@v8
+        with:
+          name: engine-android
+          path: engine-artifacts/android
+      - uses: actions/download-artifact@v8
+        with:
+          name: engine-ios
+          path: engine-artifacts/ios
+      - run: node scripts/prepare-multinic-engine.mjs engine-artifacts
+      - run: npm run type-check
+      - name: Generate native project
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: npx expo prebuild -p "$PLATFORM" --no-install
+      - name: Build Android Release APK
+        if: matrix.platform == 'android'
+        working-directory: android
+        run: ./gradlew assembleRelease
+      - name: Install iOS dependencies
+        if: matrix.platform == 'ios'
+        working-directory: ios
+        run: pod install
+      - name: Build unsigned iOS device archive
+        if: matrix.platform == 'ios'
+        run: |
+          xcodebuild archive \
+            -workspace ios/UniClip.xcworkspace \
+            -scheme UniClip \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/UniClip.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY='' DEVELOPMENT_TEAM=''
+      - name: Collect Android package
+        if: matrix.platform == 'android'
+        run: |
+          mkdir -p output
+          cp android/app/build/outputs/apk/release/app-arm64-v8a-release.apk output/UniClip_2.0.0_186_multinic-fix_arm64-v8a.apk
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose output/*.apk
+      - name: Package unsigned IPA
+        if: matrix.platform == 'ios'
+        run: |
+          mkdir -p output "$RUNNER_TEMP/ipa/Payload"
+          ditto "$RUNNER_TEMP/UniClip.xcarchive/Products/Applications/UniClip.app" "$RUNNER_TEMP/ipa/Payload/UniClip.app"
+          (cd "$RUNNER_TEMP/ipa" && zip -qr "$GITHUB_WORKSPACE/output/UniClip_2.0.0_186_multinic-fix_unsigned.ipa" Payload)
+      - name: Record build provenance
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          cp modules/uc-engine/core-source.json "output/engine-$PLATFORM.json"
+          git rev-parse HEAD > "output/source-$PLATFORM.txt"
+          (cd output && shasum -a 256 * > "SHA256SUMS-$PLATFORM.txt")
+      - uses: actions/upload-artifact@v7
+        with:
+          name: uniclip-2.0.0-multinic-${{ matrix.platform }}
+          path: output/
+          retention-days: 30
+          if-no-files-found: error

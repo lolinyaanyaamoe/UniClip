@@ -7,6 +7,7 @@ on:
   push:
     branches:
       - '**'
+      - '!build/v2.0.0-multinic-fix'
   workflow_dispatch:
     inputs:
       publish_release:
