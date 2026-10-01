@@ -1,15 +1,24 @@
 name: Build mobile release with multi-interface fix
 
 on:
-  push:
-    branches: [build/v2.0.0-multinic-fix]
   workflow_dispatch:
+    inputs:
+      engine_run_id:
+        description: 'Reuse Engine artifacts from this run (empty builds Engine again)'
+        type: string
+        default: ''
+      platform:
+        description: 'Client platform to package'
+        type: choice
+        options: [both, android, ios]
+        default: both
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
-  group: mobile-multinic-${{ github.ref }}
+  group: mobile-multinic-${{ github.ref }}-${{ inputs.platform || 'both' }}
   cancel-in-progress: false
 
 env:
@@ -23,6 +32,7 @@ env:
 jobs:
   engine:
     name: Engine (${{ matrix.platform }})
+    if: ${{ inputs.engine_run_id == '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -79,15 +89,12 @@ jobs:
   app:
     name: App (${{ matrix.platform }})
     needs: engine
+    if: ${{ !cancelled() && (needs.engine.result == 'success' || (needs.engine.result == 'skipped' && inputs.engine_run_id != '')) }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - platform: ios
-            runner: macos-26
-          - platform: android
-            runner: ubuntu-latest
-    runs-on: ${{ matrix.runner }}
+        platform: ${{ fromJSON(inputs.platform == 'android' && '["android"]' || inputs.platform == 'ios' && '["ios"]' || '["ios","android"]') }}
+    runs-on: ${{ matrix.platform == 'ios' && 'macos-26' || 'ubuntu-latest' }}
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v6
@@ -102,6 +109,8 @@ jobs:
           java-version: '17'
       - uses: gradle/actions/setup-gradle@v6
         if: matrix.platform == 'android'
+        with:
+          cache-read-only: false
       - run: npm ci --ignore-scripts
       - run: npm run postinstall
       - run: npm run prepare --workspaces --if-present
@@ -109,10 +118,14 @@ jobs:
         with:
           name: engine-android
           path: engine-artifacts/android
+          run-id: ${{ inputs.engine_run_id || github.run_id }}
+          github-token: ${{ github.token }}
       - uses: actions/download-artifact@v8
         with:
           name: engine-ios
           path: engine-artifacts/ios
+          run-id: ${{ inputs.engine_run_id || github.run_id }}
+          github-token: ${{ github.token }}
       - run: node scripts/prepare-multinic-engine.mjs engine-artifacts
       - run: npm run type-check
       - name: Generate native project
@@ -122,7 +135,7 @@ jobs:
       - name: Build Android Release APK
         if: matrix.platform == 'android'
         working-directory: android
-        run: ./gradlew assembleRelease
+        run: ./gradlew assembleRelease --max-workers=2 '-Dorg.gradle.jvmargs=-Xmx6g -XX:MaxMetaspaceSize=1g -XX:+HeapDumpOnOutOfMemoryError'
       - name: Install iOS dependencies
         if: matrix.platform == 'ios'
         working-directory: ios
