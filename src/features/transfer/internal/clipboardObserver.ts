@@ -1,4 +1,4 @@
-import { AppState } from 'react-native';
+import { AppState, Platform } from 'react-native';
 import type { ClipboardContent } from '@/types/clipboard';
 import type { SyncDeliveryResult } from '@/features/sync';
 import { useSettingsStore } from '@/features/settings';
@@ -23,7 +23,12 @@ export async function notifyDeviceClipboardChanged(
 ): Promise<SyncDeliveryResult | null> {
   const settings = useSettingsStore.getState();
   const config = settings.config;
-  const appIsBackground = AppState.currentState !== 'active';
+  // iOS paste permission dialogs temporarily make the foreground app inactive.
+  // The monitor keeps reading in that state; applying the background policy here
+  // would capture without sending, then deduplication would hide the next read.
+  const appState = AppState.currentState;
+  const appIsBackground =
+    appState !== 'active' && !(Platform.OS === 'ios' && appState === 'inactive');
   const dispatch =
     (appIsBackground
       ? canAutoPushInBackground(

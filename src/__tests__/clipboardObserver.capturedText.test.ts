@@ -3,7 +3,10 @@ import { beforeEach, describe, expect, it, jest } from '@jest/globals';
 describe('captured clipboard dispatch', () => {
   beforeEach(() => {
     jest.resetModules();
-    jest.doMock('react-native', () => ({ AppState: { currentState: 'background' } }));
+    jest.doMock('react-native', () => ({
+      AppState: { currentState: 'background' },
+      Platform: { OS: 'android' },
+    }));
     jest.doMock('@/features/settings', () => ({
       useSettingsStore: {
         getState: () => ({
@@ -47,6 +50,47 @@ describe('captured clipboard dispatch', () => {
       await notifyDeviceClipboardChanged(content);
 
       expect(observe).toHaveBeenCalledWith(content, true);
+    }
+  );
+
+  it.each([
+    ['ios', 'inactive', true, true],
+    ['ios', 'inactive', false, false],
+    ['ios', 'background', true, false],
+    ['ios', null, true, false],
+    ['android', 'inactive', true, false],
+    ['android', 'active', true, true],
+  ])(
+    '%s %s with auto push=%s dispatches=%s when background upload is disabled',
+    async (platform, appState, autoPushLocal, expectedDispatch) => {
+      jest.doMock('react-native', () => ({
+        AppState: { currentState: appState },
+        Platform: { OS: platform },
+      }));
+      jest.doMock('@/features/settings', () => ({
+        useSettingsStore: {
+          getState: () => ({
+            config: {
+              autoPushLocal,
+              enableBackgroundTasks: false,
+              enableBackgroundUpload: false,
+            },
+            isTempDisabledBackgroundTasks: false,
+          }),
+        },
+      }));
+      jest.dontMock('@/utils/syncDirectionPolicy');
+
+      const {
+        configureClipboardObserver,
+        notifyDeviceClipboardChanged,
+      } = require('@/features/transfer/internal/clipboardObserver');
+      const observe = jest.fn<() => Promise<null>>().mockResolvedValue(null);
+      configureClipboardObserver(observe);
+      const content = { type: 'Text', text: 'local test', profileHash: 'local-test' };
+      await notifyDeviceClipboardChanged(content);
+
+      expect(observe).toHaveBeenCalledWith(content, expectedDispatch);
     }
   );
 });

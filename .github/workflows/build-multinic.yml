@@ -128,6 +128,8 @@ jobs:
           github-token: ${{ github.token }}
       - run: node scripts/prepare-multinic-engine.mjs engine-artifacts
       - run: npm run type-check
+      - name: Verify clipboard foreground dispatch policy
+        run: npm test -- --runInBand --watchman=false src/__tests__/clipboardObserver.capturedText.test.ts
       - name: Generate native project
         env:
           PLATFORM: ${{ matrix.platform }}
@@ -163,6 +165,9 @@ jobs:
           mkdir -p output "$RUNNER_TEMP/ipa/Payload"
           ditto "$RUNNER_TEMP/UniClip.xcarchive/Products/Applications/UniClip.app" "$RUNNER_TEMP/ipa/Payload/UniClip.app"
           (cd "$RUNNER_TEMP/ipa" && zip -qr "$GITHUB_WORKSPACE/output/UniClip_2.0.0_186_multinic-fix_unsigned.ipa" Payload)
+      - name: Package TrollStore TIPA with shared storage entitlements
+        if: matrix.platform == 'ios'
+        run: python3 scripts/package-trollstore.py output/UniClip_2.0.0_186_multinic-fix_unsigned.ipa output/UniClip_2.0.0_186_ios-inactive-fix_trollstore.tipa
       - name: Record build provenance
         env:
           PLATFORM: ${{ matrix.platform }}
